@@ -1,0 +1,72 @@
+name: 打包 Windows 版 AI业务台
+
+# PyInstaller 不能跨平台交叉编译：macOS 上打不出 Windows 的 exe。
+# 这条工作流让 GitHub 云上的 Windows 机器替你打一次包。
+# 最终用户那台电脑不需要装 Python / Flask / PyInstaller。
+#
+# 触发方式：手动（Actions 页面 → 选这条工作流 → Run workflow），
+# 或由本地用 API 发 workflow_dispatch 事件。
+#
+# 注意：这里刻意用命令行而不是 `pyinstaller AI业务台.spec`——
+# 那个 spec 里写着 target_arch='universal2'，是 macOS 专属参数，Windows 上会报错。
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 装依赖
+        run: pip install flask pyinstaller
+
+      # 关键差异：--add-data 的分隔符在 Windows 上是分号 ;，
+      # 在 macOS / Linux 上是冒号 :（本地那条命令用的是 ":"）。
+      - name: 打包单文件 exe
+        run: >
+          python -m PyInstaller --onefile --noconsole --name "AI业务台"
+          --add-data "programs\sqlite_init.py;." programs\web_app.py
+
+      - name: 确认产物
+        run: |
+          Get-ChildItem dist | Format-Table Name, Length
+          "{0:N0} bytes" -f (Get-Item "dist\AI业务台.exe").Length
+
+      # 为什么还要多此一举把 exe 提交回仓库：
+      # GitHub 的 artifact 下载走 objects.githubusercontent.com 这条 CDN，
+      # 某些网络环境下极慢甚至不通；而 api.github.com 是通的。
+      # 所以额外把 exe 推到一个孤儿分支 win-exe 上，
+      # 本地再用 Contents API 以 base64 取回，绕开 artifact CDN。
+      - name: 回传 exe 到 win-exe 分支
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git config --global user.email "ci@users.noreply.github.com"
+          git config --global user.name "windows-builder"
+          $url = "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
+          git clone --depth 1 $url _push
+          Copy-Item "dist\AI业务台.exe" "_push\AI业务台-windows.exe" -Force
+          Set-Location _push
+          git checkout --orphan win-exe
+          git reset
+          git add "AI业务台-windows.exe"
+          git commit -m "ci: Windows 单文件 exe"
+          git push -f origin win-exe
+          Write-Host "已推送到分支 win-exe，文件：AI业务台-windows.exe"
+
+      - name: 同时上传一份 artifact（网络通畅时更方便）
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI业务台-windows-exe
+          path: dist/AI业务台.exe
+          if-no-files-found: warn
